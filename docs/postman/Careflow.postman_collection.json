@@ -1,0 +1,924 @@
+{
+  "info": {
+    "name": "Careflow Appointment Booking API",
+    "description": "Executable documentation for the Careflow API.\n\nThe collection is ordered as a real booking journey, and every request captures what the next one needs, so a fresh clone can run top to bottom with no manual copying of ids or tokens:\n\n1. **System** — liveness, readiness, metrics.\n2. **Auth** — login as patient and therapist; the access tokens are captured into collection variables automatically.\n3. **Availability** — list therapists, capture one, read bookable slots and capture the first one.\n4. **Holds** — hold that slot, prove the hold survives a page refresh, release it.\n5. **Booking** — confirm the hold with an Idempotency-Key, then replay the same key (must not double-book) and reuse it with a different body (must be refused).\n6. **Recurring series** — create a weekly series, cancel one occurrence, cancel the series.\n7. **Conflict race** — a second patient loses the race for a held slot, and the deterministic 409 is asserted.\n\nEvery request has assertions, so this doubles as a contract test: `newman run docs/postman/Careflow.postman_collection.json -e docs/postman/Careflow.local.postman_environment.json`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "patientToken", "value": "" },
+    { "key": "patient2Token", "value": "" },
+    { "key": "therapistToken", "value": "" },
+    { "key": "therapistId", "value": "" },
+    { "key": "slotStart", "value": "" },
+    { "key": "holdId", "value": "" },
+    { "key": "appointmentId", "value": "" },
+    { "key": "seriesId", "value": "" },
+    { "key": "seriesInstanceId", "value": "" },
+    { "key": "idempotencyKey", "value": "" }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// A fresh Idempotency-Key per request, so re-running the collection never replays a",
+          "// stored response by accident. The two requests that deliberately reuse a key set it",
+          "// themselves from {{savedIdempotencyKey}} instead of reading this one.",
+          "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));",
+          "",
+          "// Dates are computed rather than hard-coded so the collection does not rot: a fixed",
+          "// date would start failing the moment it fell into the past.",
+          "const toDateOnly = (date) => date.toISOString().slice(0, 10);",
+          "const today = new Date();",
+          "const horizon = new Date(today.getTime() + 13 * 24 * 60 * 60 * 1000);",
+          "pm.collectionVariables.set('fromDate', toDateOnly(today));",
+          "pm.collectionVariables.set('toDate', toDateOnly(horizon));"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Applies to every response in the collection: the API contract says each one carries a",
+          "// correlation id, and support cannot trace anything without it.",
+          "pm.test('response carries a request id', function () {",
+          "  pm.expect(pm.response.headers.has('x-request-id')).to.be.true;",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Liveness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] },
+            "description": "Process health only. Checks no dependency on purpose: if this consulted Postgres, a brief failover would make the orchestrator kill all three healthy tasks."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('alive', () => pm.response.to.have.status(200));",
+                  "pm.test('reports which task answered', function () {",
+                  "  pm.expect(pm.response.headers.has('x-instance-id')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Readiness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/ready", "host": ["{{baseUrl}}"], "path": ["ready"] },
+            "description": "Dependency health. Returns 503 while draining so the load balancer removes the task before the listener closes."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ready for traffic', () => pm.response.to.have.status(200));",
+                  "pm.test('postgres reachable', function () {",
+                  "  pm.expect(pm.response.json().checks.database).to.eql('ok');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/metrics", "host": ["{{baseUrl}}"], "path": ["metrics"] },
+            "description": "Prometheus exposition format. Not exposed through the public listener in AWS; scraped by the CloudWatch agent."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('exposes counters', function () {",
+                  "  pm.expect(pm.response.text()).to.include('careflow_http_requests_total');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login (patient)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "content-type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{patientEmail}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "auth", "login"]
+            },
+            "description": "Returns a 15-minute access token in the body and sets a rotating refresh token as an httpOnly cookie. The refresh token is never readable by scripts, which is the point."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('authenticated', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('patientToken', body.accessToken);",
+                  "pm.test('token captured for the rest of the run', function () {",
+                  "  pm.expect(body.accessToken).to.be.a('string').and.not.empty;",
+                  "  pm.expect(body.user.role).to.eql('PATIENT');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login (therapist)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "content-type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{therapistEmail}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "auth", "login"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('authenticated', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('therapistToken', body.accessToken);",
+                  "pm.test('role is therapist', () => pm.expect(body.user.role).to.eql('THERAPIST'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login with a wrong password",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "content-type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{patientEmail}}\",\n  \"password\": \"definitely-not-the-password\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "auth", "login"]
+            },
+            "description": "The response is identical for an unknown email and a wrong password. Distinguishing them would turn this endpoint into an account-enumeration oracle."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejected', () => pm.response.to.have.status(401));",
+                  "pm.test('does not say which half was wrong', function () {",
+                  "  const error = pm.response.json().error;",
+                  "  pm.expect(error.code).to.eql('INVALID_CREDENTIALS');",
+                  "  pm.expect(error.message.toLowerCase()).to.include('email or password');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Who am I",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "me"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('identifies the caller', () => pm.response.to.have.status(200));",
+                  "pm.test('role comes from the token, never the request', function () {",
+                  "  pm.expect(pm.response.json().role).to.eql('PATIENT');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unauthenticated request",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "me"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejected', () => pm.response.to.have.status(401));",
+                  "pm.test('uses the standard error envelope', function () {",
+                  "  pm.expect(pm.response.json().error.code).to.eql('AUTHENTICATION_REQUIRED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Availability",
+      "item": [
+        {
+          "name": "List therapists",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/therapists?page=1&pageSize=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "therapists"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "pageSize", "value": "20" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('lists therapists', () => pm.response.to.have.status(200));",
+                  "const therapists = pm.response.json().therapists;",
+                  "pm.expect(therapists).to.be.an('array').that.is.not.empty;",
+                  "pm.collectionVariables.set('therapistId', therapists[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Therapist availability",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/therapists/{{therapistId}}/availability?from={{fromDate}}&to={{toDate}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "therapists", "{{therapistId}}", "availability"],
+              "query": [
+                { "key": "from", "value": "{{fromDate}}" },
+                { "key": "to", "value": "{{toDate}}" }
+              ]
+            },
+            "description": "Slots are computed from the therapist's schedule minus confirmed appointments and live holds, in one range query. Only bookable slots are returned, and the window is bounded so a client cannot ask for a year of slots."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('returns slots', () => pm.response.to.have.status(200));",
+                  "const slots = pm.response.json().slots;",
+                  "pm.expect(slots, 'seeded schedules should produce slots').to.be.an('array').that.is.not.empty;",
+                  "pm.collectionVariables.set('slotStart', slots[0].startTime);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Availability window too wide",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/therapists/{{therapistId}}/availability?from={{fromDate}}&to=2099-01-01",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "therapists", "{{therapistId}}", "availability"],
+              "query": [
+                { "key": "from", "value": "{{fromDate}}" },
+                { "key": "to", "value": "2099-01-01" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('bounded window is enforced', () => pm.response.to.have.status(400));",
+                  "pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Holds",
+      "item": [
+        {
+          "name": "Hold a slot",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "authorization", "value": "Bearer {{patientToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"therapistId\": \"{{therapistId}}\",\n  \"startTime\": \"{{slotStart}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/holds",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "holds"]
+            },
+            "description": "Reserves the slot for a short TTL so two patients cannot both complete a booking. `expiresAt` and `serverTime` both come from the database, so a client counts down against the server clock rather than a possibly skewed local one."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('hold created', () => pm.response.to.have.status(201));",
+                  "const hold = pm.response.json();",
+                  "pm.collectionVariables.set('holdId', hold.id);",
+                  "pm.test('expiry is authoritative and in the future', function () {",
+                  "  pm.expect(hold.expiresInSeconds).to.be.above(0);",
+                  "  pm.expect(new Date(hold.expiresAt).getTime()).to.be.above(new Date(hold.serverTime).getTime());",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Active holds (survives a refresh)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/holds/active",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "holds", "active"]
+            },
+            "description": "The hold lives in Postgres, not in browser state, so reloading the page recovers it with the correct remaining time — and any of the three tasks can answer."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('hold is recoverable', () => pm.response.to.have.status(200));",
+                  "const ids = pm.response.json().holds.map((hold) => hold.id);",
+                  "pm.expect(ids).to.include(pm.collectionVariables.get('holdId'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Conflict race",
+      "item": [
+        {
+          "name": "Login (second patient)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "content-type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{patient2Email}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "auth", "login"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('authenticated', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('patient2Token', pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Second patient loses the race",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "authorization", "value": "Bearer {{patient2Token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"therapistId\": \"{{therapistId}}\",\n  \"startTime\": \"{{slotStart}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/holds",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "holds"]
+            },
+            "description": "The loser gets a deterministic 409, not a 500 and not a silent second hold. The verdict comes from a Postgres exclusion constraint, so it holds even when both requests land on different tasks at the same instant."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('refused with a conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('the reason is specific enough to act on', function () {",
+                  "  pm.expect(pm.response.json().error.code).to.eql('SLOT_ALREADY_HELD');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Booking",
+      "item": [
+        {
+          "name": "Confirm the hold",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "authorization", "value": "Bearer {{patientToken}}" },
+              { "key": "idempotency-key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"holdId\": \"{{holdId}}\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/v1/appointments/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "appointments", "confirm"]
+            },
+            "description": "One transaction: lock the hold, insert the appointment (the exclusion constraint arbitrates), consume the hold, write the outbox event and complete the idempotency record. Either all of it happened or none of it did."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Remembered so the next two requests can deliberately reuse this exact key.",
+                  "pm.collectionVariables.set('savedIdempotencyKey', pm.collectionVariables.get('idempotencyKey'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('appointment confirmed', () => pm.response.to.have.status(201));",
+                  "const appointment = pm.response.json();",
+                  "pm.collectionVariables.set('appointmentId', appointment.id);",
+                  "pm.test('starts as SCHEDULED', () => pm.expect(appointment.status).to.eql('SCHEDULED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retry with the same key (replay, not a second booking)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "authorization", "value": "Bearer {{patientToken}}" },
+              { "key": "idempotency-key", "value": "{{savedIdempotencyKey}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"holdId\": \"{{holdId}}\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/v1/appointments/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "appointments", "confirm"]
+            },
+            "description": "The exact retry a mobile client makes when the first response is lost. Because the idempotency record lives in Postgres, any of the three tasks replays the stored response instead of booking twice."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('replayed', () => pm.response.to.have.status(201));",
+                  "pm.test('same appointment, not a new one', function () {",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('appointmentId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reuse the key with a different body",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "authorization", "value": "Bearer {{patientToken}}" },
+              { "key": "idempotency-key", "value": "{{savedIdempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"holdId\": \"00000000-0000-4000-8000-000000000000\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/appointments/confirm",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "appointments", "confirm"]
+            },
+            "description": "Refused rather than replayed. Returning the original response here would tell the caller that a *different* booking succeeded, which is worse than an error."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('key reuse is refused', () => pm.response.to.have.status(422));",
+                  "pm.expect(pm.response.json().error.code).to.eql('IDEMPOTENCY_KEY_REUSED');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My appointments",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/patients/me/appointments?page=1&pageSize=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "patients", "me", "appointments"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "pageSize", "value": "20" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('lists the booking', () => pm.response.to.have.status(200));",
+                  "const ids = pm.response.json().appointments.map((appointment) => appointment.id);",
+                  "pm.expect(ids).to.include(pm.collectionVariables.get('appointmentId'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Therapist's appointments",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{therapistToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/therapists/me/appointments?page=1&pageSize=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "therapists", "me", "appointments"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "pageSize", "value": "20" }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('therapist sees their day', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Another patient cannot read it",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patient2Token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/appointments/{{appointmentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "appointments", "{{appointmentId}}"]
+            },
+            "description": "Object-level authorization: knowing an appointment id is not permission to read it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('denied', function () {",
+                  "  pm.expect(pm.response.code, 'either denial is acceptable, leaking existence is not').to.be.oneOf([403, 404]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel the appointment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "authorization", "value": "Bearer {{patientToken}}" },
+              { "key": "idempotency-key", "value": "{{idempotencyKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/appointments/{{appointmentId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "appointments", "{{appointmentId}}", "cancel"]
+            },
+            "description": "A state transition, not a delete: the row stays for history and the slot becomes bookable again."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('cancelled', () => pm.response.to.have.status(200));",
+                  "pm.expect(pm.response.json().status).to.eql('CANCELLED');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Recurring series",
+      "item": [
+        {
+          "name": "Create a weekly series",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "content-type", "value": "application/json" },
+              { "key": "authorization", "value": "Bearer {{patientToken}}" },
+              { "key": "idempotency-key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"therapistId\": \"{{therapistId}}\",\n  \"startTime\": \"{{slotStart}}\",\n  \"frequency\": \"WEEKLY\",\n  \"occurrences\": 4\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/v1/recurring-series",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "recurring-series"]
+            },
+            "description": "All-or-nothing: if any occurrence conflicts, nothing is booked and the response lists every conflicting occurrence. Validation runs under a per-therapist advisory lock so concurrent series cannot interleave."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('series created', () => pm.response.to.have.status(201));",
+                  "const series = pm.response.json();",
+                  "pm.collectionVariables.set('seriesId', series.id);",
+                  "pm.collectionVariables.set('seriesInstanceId', series.appointments[0].id);",
+                  "pm.test('every occurrence was booked, or none', function () {",
+                  "  pm.expect(series.appointments).to.have.lengthOf(4);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel one occurrence",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "authorization", "value": "Bearer {{patientToken}}" },
+              { "key": "idempotency-key", "value": "{{idempotencyKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/recurring-series/{{seriesId}}/instances/{{seriesInstanceId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": [
+                "v1",
+                "recurring-series",
+                "{{seriesId}}",
+                "instances",
+                "{{seriesInstanceId}}",
+                "cancel"
+              ]
+            },
+            "description": "Cancelling one week must not touch the series or its siblings — the common case of 'I'm away that Tuesday'."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('occurrence cancelled', () => pm.response.to.have.status(200));",
+                  "pm.expect(pm.response.json().status).to.eql('CANCELLED');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Read the series",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/recurring-series/{{seriesId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "recurring-series", "{{seriesId}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('series is readable', () => pm.response.to.have.status(200));",
+                  "const series = pm.response.json();",
+                  "pm.test('one instance cancelled, series still active', function () {",
+                  "  pm.expect(series.status).to.eql('ACTIVE');",
+                  "  const cancelled = series.appointments.filter((a) => a.status === 'CANCELLED');",
+                  "  pm.expect(cancelled).to.have.lengthOf(1);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel the series",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "authorization", "value": "Bearer {{patientToken}}" },
+              { "key": "idempotency-key", "value": "{{idempotencyKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/recurring-series/{{seriesId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "recurring-series", "{{seriesId}}", "cancel"]
+            },
+            "description": "Cancels only future SCHEDULED occurrences. Past appointments are history and stay immutable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('series cancelled', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.expect(body.series.status).to.eql('CANCELLED');",
+                  "pm.test('only the future occurrences were cancelled', function () {",
+                  "  // Four created, one already cancelled individually, so three remain.",
+                  "  pm.expect(body.cancelledCount).to.eql(3);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Session lifecycle",
+      "item": [
+        {
+          "name": "Refresh the session",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/refresh",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "auth", "refresh"]
+            },
+            "description": "Uses the httpOnly cookie set at login; no token is sent in the body. Each refresh rotates the token and revokes the old one, so replaying a stolen token is detected and kills the whole family."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rotated', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('patientToken', pm.response.json().accessToken);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Log out",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "authorization", "value": "Bearer {{patientToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/v1/auth/logout",
+              "host": ["{{baseUrl}}"],
+              "path": ["v1", "auth", "logout"]
+            },
+            "description": "Revokes the refresh-token family server-side and clears the cookie. A client-side token drop alone would leave a usable refresh token in the wild."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('logged out', () => pm.response.to.have.status(204));"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

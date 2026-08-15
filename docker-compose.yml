@@ -1,0 +1,313 @@
+# ---------------------------------------------------------------------------
+# Careflow local stack.
+#
+# This is not a "just get Postgres running" compose file. It reproduces the shape of the
+# production topology so that distributed bugs surface on a laptop instead of in AWS:
+#
+#   nginx (stands in for the ALB)
+#     -> api-1, api-2, api-3   (three stateless tasks, exactly like ECS desired-count 3)
+#          -> postgres         (the only source of truth for booking state)
+#          -> redis            (rate limiting + schedule cache, never correctness)
+#          -> localstack       (real SQS API, so the adapter code path is identical)
+#
+#   worker-outbox / worker-notifications / worker-sweeper run as their own containers,
+#   one process each, because that is how they are deployed. No pm2: a supervisor inside a
+#   container hides crashes from the orchestrator that is supposed to restart them.
+#
+# Start with:  make up      (or docker compose up -d --build)
+# API entry:   http://localhost:8080
+# ---------------------------------------------------------------------------
+
+name: careflow
+
+x-app-env: &app-env
+  NODE_ENV: development
+  LOG_LEVEL: debug
+# Hostnames inside the Compose network. Values in `.env` use localhost so the same
+# file works for `npm run dev` on the host; these overrides win inside containers.
+  DATABASE_URL: postgresql://careflow_app:careflow_local_pw@postgres:5432/careflow
+  MIGRATION_DATABASE_URL: postgresql://careflow_owner:careflow_owner_pw@postgres:5432/careflow
+  DB_SSL: 'false'
+  DB_POOL_MAX: '10'
+  REDIS_URL: redis://redis:6379
+  REDIS_ENABLED: 'true'
+  JWT_SECRET: local_dev_only_secret_change_me_00000000000000000000000000000000
+  JWT_ISSUER: careflow
+  JWT_AUDIENCE: careflow-api
+  COOKIE_SECURE: 'false'
+  COOKIE_SAME_SITE: lax
+  CORS_ORIGINS: http://localhost:5173,http://localhost:8080
+  APP_TIMEZONE: Asia/Kolkata
+  SLOT_GRANULARITY_MINUTES: '60'
+  HOLD_TTL_SECONDS: '60'
+  MAX_ACTIVE_HOLDS_PER_PATIENT: '3'
+  QUEUE_DRIVER: sqs
+  AWS_REGION: ap-south-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SQS_ENDPOINT: http://localstack:4566
+  SQS_QUEUE_URL: http://localstack:4566/000000000000/careflow-events
+  SWAGGER_ENABLED: 'true'
+  # Production keeps the strict default (5 attempts per 5 minutes per IP). Locally every
+  # replica, the smoke script and the E2E suite all log in from the same host address, so the
+  # strict value would throttle the tooling rather than an attacker.
+  RATE_LIMIT_LOGIN_MAX: '100'
+  RATE_LIMIT_LOGIN_WINDOW_SECONDS: '60'
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: Dockerfile.dev
+  env_file:
+    - .env
+  # Source is mounted for hot reload; node_modules stays inside the image so that a host
+  # install for a different platform cannot break the container's native argon2 build.
+  volumes:
+    - ./src:/app/src:ro
+    - ./migrations:/app/migrations:ro
+    - ./package.json:/app/package.json:ro
+    - ./tsconfig.json:/app/tsconfig.json:ro
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    container_name: careflow-postgres
+    environment:
+      POSTGRES_USER: careflow_owner
+      POSTGRES_PASSWORD: careflow_owner_pw
+      POSTGRES_DB: careflow
+      # Deterministic UTC storage; the app converts to APP_TIMEZONE at the boundary.
+      TZ: UTC
+      PGTZ: UTC
+    command:
+      - postgres
+      # Headroom for the concurrency suite, which opens many simultaneous transactions.
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      # Surfaces accidental N+1s and missing indexes during development.
+      - -c
+      - log_min_duration_statement=200
+      - -c
+      - log_lock_waits=on
+      - -c
+      - deadlock_timeout=1s
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U careflow_owner -d careflow']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: careflow-redis
+    command:
+      - redis-server
+      - --appendonly
+      - 'no'
+      - --maxmemory
+      - 256mb
+      # Rate-limit counters and cached schedules are all disposable by design.
+      - --maxmemory-policy
+      - allkeys-lru
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:4.6
+    container_name: careflow-localstack
+    environment:
+      SERVICES: sqs
+      DEBUG: '0'
+      AWS_DEFAULT_REGION: ap-south-1
+      SQS_ENDPOINT_STRATEGY: path
+    ports:
+      - '4566:4566'
+    volumes:
+      - ./docker/localstack/init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS http://localhost:4566/_localstack/health | grep -q ''"sqs": "\(running\|available\)"'''
+      interval: 6s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  # One-shot job. Schema changes are applied by a dedicated process with elevated DB
+  # privileges, never by the API on boot: three tasks racing to migrate is a real outage.
+  migrate:
+    <<: *app-build
+    container_name: careflow-migrate
+    command: sh -c "npm run db:migrate && npm run db:seed"
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  api-1: &api-service
+    <<: *app-build
+    container_name: careflow-api-1
+    command: npm run dev
+    environment:
+      <<: *app-env
+      SERVICE_NAME: careflow-api
+      INSTANCE_ID: api-1
+      PORT: '3000'
+    # Shared alias: `api` resolves to all three containers, which is what lets nginx load
+    # balance over a name it can re-resolve instead of IPs frozen at its own startup.
+    networks:
+      default:
+        aliases:
+          - api
+    ports:
+      - '3001:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:3000/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 25s
+
+  api-2:
+    <<: *api-service
+    container_name: careflow-api-2
+    environment:
+      <<: *app-env
+      SERVICE_NAME: careflow-api
+      INSTANCE_ID: api-2
+      PORT: '3000'
+    ports:
+      - '3002:3000'
+
+  api-3:
+    <<: *api-service
+    container_name: careflow-api-3
+    environment:
+      <<: *app-env
+      SERVICE_NAME: careflow-api
+      INSTANCE_ID: api-3
+      PORT: '3000'
+    ports:
+      - '3003:3000'
+
+  # Stands in for the ALB. Round-robins across the three tasks so that a booking flow
+  # spanning several requests is genuinely served by different instances.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: careflow-nginx
+    ports:
+      - '8080:80'
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api-1:
+        condition: service_started
+      api-2:
+        condition: service_started
+      api-3:
+        condition: service_started
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '--spider', 'http://127.0.0.1/health']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  worker-outbox:
+    <<: *app-build
+    container_name: careflow-worker-outbox
+    command: npm run dev:outbox
+    environment:
+      <<: *app-env
+      SERVICE_NAME: careflow-outbox-publisher
+      INSTANCE_ID: worker-outbox-1
+      WORKER_HEALTH_PORT: '3100'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:3100/health']
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 25s
+
+  worker-notifications:
+    <<: *app-build
+    container_name: careflow-worker-notifications
+    command: npm run dev:notifications
+    environment:
+      <<: *app-env
+      SERVICE_NAME: careflow-notification-consumer
+      INSTANCE_ID: worker-notifications-1
+      WORKER_HEALTH_PORT: '3100'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:3100/health']
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 25s
+
+  worker-sweeper:
+    <<: *app-build
+    container_name: careflow-worker-sweeper
+    command: npm run dev:sweeper
+    environment:
+      <<: *app-env
+      SERVICE_NAME: careflow-hold-sweeper
+      INSTANCE_ID: worker-sweeper-1
+      WORKER_HEALTH_PORT: '3100'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:3100/health']
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 25s
+
+volumes:
+  postgres-data:
+    name: careflow-postgres-data

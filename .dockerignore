@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+tests
+docs
+infra
+.vitest-reports
+docker-compose.yml
+Makefile

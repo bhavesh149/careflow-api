@@ -1,0 +1,166 @@
+name: Deploy
+
+# Production pipeline for the backend repo. Image first, schema second, traffic last.
+#
+# A new API task must never boot against a schema it does not understand, and a failed
+# rolling deploy must roll itself back. That is why migration is a gated ECS RunTask that
+# the workflow waits on, and why the ECS services are created with a circuit breaker.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy (defaults to the git SHA)
+        required: false
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  NODE_VERSION: '22'
+
+jobs:
+  push:
+    name: Build and push to ECR
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Push image
+        id: meta
+        env:
+          TAG: ${{ github.event.inputs.image_tag || github.sha }}
+        run: |
+          IMAGE="${{ steps.ecr.outputs.registry }}/careflow:${TAG}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  migrate:
+    name: Gated schema migration
+    needs: push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Run the migration task and wait
+        env:
+          IMAGE: ${{ needs.push.outputs.image }}
+        run: |
+          set -euo pipefail
+          CLUSTER=$(aws cloudformation describe-stacks --stack-name Careflow \
+            --query "Stacks[0].Outputs[?OutputKey=='ClusterName'].OutputValue" --output text)
+          FAMILY=$(aws cloudformation describe-stacks --stack-name Careflow \
+            --query "Stacks[0].Outputs[?OutputKey=='MigrateTaskDefinitionFamily'].OutputValue" --output text)
+          SUBNETS=$(aws cloudformation describe-stacks --stack-name Careflow \
+            --query "Stacks[0].Outputs[?OutputKey=='IsolatedSubnetIds'].OutputValue" --output text)
+          SG=$(aws cloudformation describe-stacks --stack-name Careflow \
+            --query "Stacks[0].Outputs[?OutputKey=='TaskSecurityGroupId'].OutputValue" --output text)
+
+          TASK_DEF=$(aws ecs describe-task-definition --task-definition "$FAMILY")
+          NEW_DEF=$(echo "$TASK_DEF" | python3 -c '
+          import json, os, sys
+          raw = json.load(sys.stdin)["taskDefinition"]
+          image = os.environ["IMAGE"]
+          for key in ("taskDefinitionArn","revision","status","requiresAttributes",
+                      "compatibilities","registeredAt","registeredBy"):
+              raw.pop(key, None)
+          for container in raw.get("containerDefinitions", []):
+              container["image"] = image
+          print(json.dumps(raw))
+          ')
+
+          NEW_ARN=$(aws ecs register-task-definition --cli-input-json "$NEW_DEF" \
+            --query taskDefinition.taskDefinitionArn --output text)
+
+          RUN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$NEW_ARN" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SG}],assignPublicIp=ENABLED}" \
+            --query "tasks[0].taskArn" --output text)
+
+          echo "Migration task $RUN"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$RUN"
+
+          EXIT=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$RUN" \
+            --query "tasks[0].containers[0].exitCode" --output text)
+          if [ "$EXIT" != "0" ]; then
+            echo "Migration failed with exit code $EXIT"
+            aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$RUN"
+            exit 1
+          fi
+
+  deploy:
+    name: ECS rolling deploy
+    needs: [push, migrate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: infra/package.json
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Synth and deploy
+        working-directory: infra
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
+        run: |
+          npm install
+          npx cdk deploy Careflow \
+            --require-approval never \
+            --context imageTag="$IMAGE_TAG"
+
+  smoke:
+    name: Post-deploy smoke
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Probe /health and /ready through the ALB
+        run: |
+          set -euo pipefail
+          BASE=$(aws cloudformation describe-stacks --stack-name Careflow \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          for i in $(seq 1 20); do
+            if curl -fsS "$BASE/ready" | grep -q ready; then
+              curl -fsS "$BASE/health"
+              curl -fsS "$BASE/metrics" | grep -q careflow_http_requests_total
+              echo "Smoke passed against $BASE"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "API did not become ready"
+          exit 1

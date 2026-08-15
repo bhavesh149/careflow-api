@@ -1,0 +1,102 @@
+name: PR
+
+# Pull-request gate for the backend repo. Nothing here talks to AWS: a fork PR must be
+# able to prove the same properties the production deploy will rely on, without credentials.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+  DATABASE_URL: postgresql://careflow_test:careflow_test@localhost:5432/careflow_test
+  JWT_SECRET: ci_secret_that_is_long_enough_to_pass_validation_000000000000
+  QUEUE_DRIVER: noop
+  REDIS_ENABLED: 'false'
+  COOKIE_SECURE: 'false'
+  NODE_ENV: test
+
+jobs:
+  quality:
+    name: Typecheck, lint, unit, audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test:unit
+      - name: Production-dependency audit
+        # Dev-only advisories (test runners, the OpenAPI exporter) must not block a merge.
+        # Runtime advisories must: a vulnerable argon2 or pg in production is a real incident.
+        run: npm audit --omit=dev --audit-level=high
+      - name: OpenAPI contract has not drifted
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+          QUEUE_DRIVER: noop
+          REDIS_ENABLED: 'false'
+          SWAGGER_ENABLED: 'true'
+        run: |
+          npm run openapi:export
+          git diff --exit-code -- docs/api/openapi.json
+
+  integration:
+    name: Integration, concurrency, e2e
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_USER: careflow_test
+          POSTGRES_PASSWORD: careflow_test
+          POSTGRES_DB: careflow_test
+          TZ: UTC
+          PGTZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U careflow_test -d careflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://careflow_test:careflow_test@localhost:5432/careflow_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run test:integration
+      - run: npm run test:concurrency
+      - run: npm run test:e2e
+
+  docker:
+    name: Image build and Trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the production image
+        run: docker build -t careflow:${{ github.sha }} .
+      - name: Scan the image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: careflow:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true

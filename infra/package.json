@@ -1,0 +1,27 @@
+{
+  "name": "@careflow/infra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AWS CDK v2 infrastructure for the Careflow booking backend",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.265.0",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "aws-cdk": "2.1136.0",
+    "tsx": "4.20.5",
+    "typescript": "5.9.3"
+  }
+}
