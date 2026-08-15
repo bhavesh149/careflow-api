@@ -1,11 +1,9 @@
 name: PR
 
-# Pull-request gate for the backend repo. Nothing here talks to AWS: a fork PR must be
-# able to prove the same properties the production deploy will rely on, without credentials.
+# Pull-request gate. Nothing here talks to AWS.
+# Runs only on PRs — a push to main is Deploy's job, not a second copy of this pipeline.
 on:
   pull_request:
-  push:
-    branches: [main]
 
 concurrency:
   group: pr-${{ github.workflow }}-${{ github.ref }}
@@ -13,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write
 
 env:
   NODE_VERSION: '22'
@@ -39,8 +38,6 @@ jobs:
       - run: npm run lint
       - run: npm run test:unit
       - name: Production-dependency audit
-        # Dev-only advisories (test runners, the OpenAPI exporter) must not block a merge.
-        # Runtime advisories must: a vulnerable argon2 or pg in production is a real incident.
         run: npm audit --omit=dev --audit-level=high
       - name: OpenAPI contract has not drifted
         env:
@@ -90,8 +87,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       - name: Build the production image
-        run: docker build -t careflow:${{ github.sha }} .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: careflow:${{ github.sha }}
+          cache-from: type=gha,scope=careflow-api
+          cache-to: type=gha,scope=careflow-api,mode=max
+          provenance: false
       - name: Scan the image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
