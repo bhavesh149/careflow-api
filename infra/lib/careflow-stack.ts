@@ -21,6 +21,7 @@ import * as rds from 'aws-cdk-lib/aws-rds';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { type Construct } from 'constructs';
+import { runtimeConfig } from './runtime-config.js';
 
 const BACKEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -149,14 +150,14 @@ export class CareflowStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    const jwtSecret = new secretsmanager.Secret(this, 'Jwt', {
-      description: 'Careflow JWT signing secret',
-      generateSecretString: {
-        passwordLength: 64,
-        excludePunctuation: true,
-      },
-      removalPolicy: RemovalPolicy.DESTROY,
-    });
+    const jwtSecretArn = this.node.tryGetContext('jwtSecretArn') as string | undefined;
+    if (!jwtSecretArn) {
+      throw new Error(
+        'Missing context jwtSecretArn. Generate .env.aws, run scripts/aws-put-secrets.sh, then put the ARN in infra/cdk.json.',
+      );
+    }
+
+    const jwtSecret = secretsmanager.Secret.fromSecretCompleteArn(this, 'Jwt', jwtSecretArn);
 
     const repository = new ecr.Repository(this, 'Repository', {
       repositoryName: 'careflow',
@@ -205,28 +206,15 @@ export class CareflowStack extends Stack {
     });
 
     const sharedEnvironment: Record<string, string> = {
-      NODE_ENV: 'production',
-      LOG_LEVEL: 'info',
-      HOST: '0.0.0.0',
+      ...runtimeConfig,
       DB_HOST: database.instanceEndpoint.hostname,
       DB_PORT: String(database.instanceEndpoint.port),
       DB_NAME: DATABASE_NAME,
       DB_USER: DATABASE_USER,
-      DB_SSL: 'true',
       REDIS_URL: `redis://${redis.attrRedisEndpointAddress}:${redis.attrRedisEndpointPort}`,
-      REDIS_ENABLED: 'true',
-      JWT_ISSUER: 'careflow',
-      JWT_AUDIENCE: 'careflow-api',
-      COOKIE_SECURE: 'true',
-      COOKIE_SAME_SITE: 'lax',
       CORS_ORIGINS: corsOrigins,
-      APP_TIMEZONE: 'Asia/Kolkata',
-      QUEUE_DRIVER: 'sqs',
       AWS_REGION: Stack.of(this).region,
       SQS_QUEUE_URL: queue.queueUrl,
-      SWAGGER_ENABLED: 'true',
-      RATE_LIMIT_LOGIN_MAX: '30',
-      RATE_LIMIT_LOGIN_WINDOW_SECONDS: '300',
     };
 
     const sharedSecrets: Record<string, ecs.Secret> = {

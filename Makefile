@@ -4,7 +4,7 @@
 .PHONY: help up down restart logs ps build migrate seed reset psql redis-cli queues \
         test test-unit test-integration test-concurrency test-e2e test-all \
         lint typecheck format check openapi smoke \
-        aws-bootstrap aws-deploy aws-migrate aws-destroy
+        aws-bootstrap aws-secrets aws-deploy aws-migrate aws-destroy
 
 COMPOSE := docker compose
 
@@ -94,8 +94,11 @@ smoke: ## Probe a running stack (health, then a booking journey; needs jq)
 
 ## ---------------------------------------------------------------- aws showcase
 
-aws-bootstrap: ## One-time CDK bootstrap in ap-south-1
+        aws-bootstrap: ## One-time CDK bootstrap in ap-south-1
 	cd infra && npx cdk bootstrap aws://853184314326/ap-south-1
+
+aws-secrets: ## Create/update Secrets Manager careflow/jwt from .env.aws
+	./scripts/aws-put-secrets.sh
 
 aws-deploy: ## Synth and deploy the Careflow stack (builds the AMD64 image)
 	cd infra && npx cdk deploy Careflow --require-approval never

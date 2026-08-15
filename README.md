@@ -12,6 +12,7 @@ outbox. Frontend is a separate repo.
 | OpenAPI file | [`docs/api/openapi.json`](docs/api/openapi.json) |
 | Postman | [`docs/postman/`](docs/postman/) |
 | AWS first deploy | [`docs/05-aws-first-deploy.md`](docs/05-aws-first-deploy.md) |
+| AWS infrastructure | [`docs/06-aws-infrastructure.md`](docs/06-aws-infrastructure.md) |
 
 ---
 
@@ -21,14 +22,15 @@ outbox. Frontend is a separate repo.
 booking, cancel/status, workers, tests, local Docker stack, and GitHub Actions YAML are in this
 repo.
 
-**Not done**
+**Not done / optional next**
 
 | Item | Notes |
 | --- | --- |
-| **AWS account deploy** | CDK stack exists (`infra/lib/careflow-stack.ts`). `bhavesh-admin` still needs **AdministratorAccess** so `make aws-bootstrap` / `make aws-deploy` can run. Then `make aws-migrate`. Guide: [`docs/05-aws-first-deploy.md`](docs/05-aws-first-deploy.md). |
+| **CI/CD against this AWS account** | PR + Deploy YAML already exist. Still need: GitHub repo with this folder as root, OIDC provider, IAM role, secret `AWS_DEPLOY_ROLE_ARN`. Until then, deploy from the laptop (`make aws-deploy`). See [`docs/06-aws-infrastructure.md`](docs/06-aws-infrastructure.md). |
+| **HTTPS / custom domain** | No ACM cert; ALB is HTTP. Fine for the showcase. |
 | **Frontend** | Separate repo; not part of this checkout. |
 | **Real notification sender** | Outbox → SQS → consumer is wired. The consumer logs; SES / Twilio are not connected. |
-| **Production seed / users** | Local Docker seed (`Careflow!2026`) is for laptops and the short AWS showcase only. |
+| **Teardown** | `make aws-destroy` when the 3–4 day demo is over, or it keeps billing. |
 
 ---
 

@@ -144,14 +144,6 @@ const envSchema = z
     }
 
     if (value.NODE_ENV === 'production') {
-      if (!value.COOKIE_SECURE) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['COOKIE_SECURE'],
-          message: 'COOKIE_SECURE must be true in production',
-        });
-      }
-
       if (value.CORS_ORIGINS.length === 0) {
         ctx.addIssue({
           code: 'custom',
