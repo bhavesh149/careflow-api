@@ -93,7 +93,7 @@ jobs:
       - name: Build the production image
         run: docker build -t careflow:${{ github.sha }} .
       - name: Scan the image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: careflow:${{ github.sha }}
           format: table
