@@ -44,11 +44,22 @@ WORKDIR /app
 # `dumb-init` reaps zombies and forwards SIGTERM to node, which is what makes
 # graceful shutdown work during an ECS rolling deployment.
 # The RDS CA bundle lets `pg` verify TLS (`DB_SSL=true`, rejectUnauthorized).
+#
+# npm (and the nested `tar` it ships) is a build tool. CVE-2026-59874 lives in
+# that nested tar and is not reachable from this process — we never unpack
+# archives. Removing npm from the runtime image is the fix, not a scan ignore.
 RUN apk add --no-cache dumb-init curl \
+  && apk upgrade --no-cache \
   && curl -fsSL -o /etc/ssl/certs/rds-global-bundle.pem \
     https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
   && addgroup -g 10001 -S careflow \
-  && adduser -u 10001 -S careflow -G careflow
+  && adduser -u 10001 -S careflow -G careflow \
+  && rm -rf \
+    /usr/local/lib/node_modules/npm \
+    /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm \
+    /usr/local/bin/npx \
+    /usr/local/bin/corepack
 
 ENV NODE_ENV=production \
     NODE_OPTIONS="--enable-source-maps" \
