@@ -28,14 +28,10 @@ COPY src ./src
 
 RUN npm run build
 
-# ---- Stage 3: production dependencies only -------------------------------
-FROM node:22.22-alpine AS prod-deps
-WORKDIR /app
-
-RUN apk add --no-cache python3 make g++
-
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+# ---- Stage 3: production dependencies ------------------------------------
+# Prune the stage-1 install instead of a second `npm ci` (that recompiled argon2).
+FROM deps AS prod-deps
+RUN npm prune --omit=dev && npm cache clean --force
 
 # ---- Stage 4: runtime ----------------------------------------------------
 FROM node:22.22-alpine AS runtime
