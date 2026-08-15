@@ -7,6 +7,7 @@ This stack is sized for a **few-day showcase**: HTTP ALB (no domain), 3 API task
 each worker, `db.t4g.micro` Postgres 17, `cache.t4g.micro` Redis, no NAT Gateway. Tear it
 down with `make aws-destroy` when you are done.
 
+Why each AWS service exists: [`../docs/06-aws-infrastructure.md`](../docs/06-aws-infrastructure.md).
 Account, IAM OIDC, GitHub secret, ACM: [`../docs/05-aws-first-deploy.md`](../docs/05-aws-first-deploy.md).
 
 ```bash

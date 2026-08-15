@@ -123,7 +123,8 @@ export const buildApp = async (dependencies: AppDependencies): Promise<CareflowA
   // ---- Security headers -------------------------------------------------
   await app.register(helmet, {
     // This is a JSON API; a restrictive CSP costs nothing and blunts any HTML that does get
-    // reflected. Swagger UI needs its own relaxation, applied on its route below.
+    // reflected. `upgrade-insecure-requests` and HSTS are HTTPS-only: on a plain-HTTP ALB they
+    // make the browser rewrite /docs to https:// and hang, because nothing is listening on 443.
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
@@ -132,12 +133,10 @@ export const buildApp = async (dependencies: AppDependencies): Promise<CareflowA
         imgSrc: ["'self'", 'data:'],
         objectSrc: ["'none'"],
         frameAncestors: ["'none'"],
+        upgradeInsecureRequests: config.COOKIE_SECURE ? [] : null,
       },
     },
-    // Only meaningful over HTTPS, and setting it locally would poison the developer's browser
-    // into refusing http://localhost for months.
-    hsts:
-      config.NODE_ENV === 'production' ? { maxAge: 31_536_000, includeSubDomains: true } : false,
+    hsts: config.COOKIE_SECURE ? { maxAge: 31_536_000, includeSubDomains: true } : false,
     crossOriginEmbedderPolicy: false,
     referrerPolicy: { policy: 'no-referrer' },
   });
@@ -270,7 +269,9 @@ export const buildApp = async (dependencies: AppDependencies): Promise<CareflowA
     await app.register(swaggerUi, {
       routePrefix: '/docs',
       uiConfig: { docExpansion: 'list', deepLinking: true, persistAuthorization: true },
-      staticCSP: true,
+      // Helmet already sets CSP. swagger-ui's static CSP includes `upgrade-insecure-requests`,
+      // which breaks the UI on an HTTP ALB.
+      staticCSP: false,
     });
   }
 

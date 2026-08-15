@@ -7,6 +7,7 @@
   "context": {
     "@aws-cdk/aws-ecs:enableImdsBlockingDeprecatedFeature": true,
     "region": "ap-south-1",
-    "imageTag": "latest"
+    "imageTag": "latest",
+    "jwtSecretArn": "arn:aws:secretsmanager:ap-south-1:853184314326:secret:careflow/jwt-ocfR7Y"
   }
 }

@@ -24,13 +24,14 @@ Sign in to the AWS console as the **root** user (or any user that already has IA
 
 For a few-day take-home this is the right policy. You can detach it after `make aws-destroy`.
 
-### 2. Bootstrap, deploy, seed
+### 2. Bootstrap, secrets, deploy, seed
 
 From the backend folder, with Docker Desktop running:
 
 ```bash
 export AWS_PROFILE=careflow
 make aws-bootstrap    # once per account/region (~1 min)
+make aws-secrets      # uploads JWT_SECRET from .env.aws to Secrets Manager careflow/jwt
 make aws-deploy       # builds linux/amd64 image + RDS/ECS/ALB (~15–20 min)
 make aws-migrate      # schema + demo accounts
 ```
