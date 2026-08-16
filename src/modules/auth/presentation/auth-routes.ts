@@ -12,14 +12,14 @@ import { getPrincipal, extractBearerToken } from '@/modules/auth/presentation/au
  *
  * Token placement, which is the security-relevant decision here:
  *
- *   Access token  -> response body, held in memory by the SPA. Short-lived (15 min).
- *   Refresh token -> httpOnly, Secure, SameSite cookie scoped to /v1/auth.
+ *   Access token  -> response body. Short-lived (15 min). SPA sends it as Authorization.
+ *   Refresh token -> httpOnly SameSite cookie scoped to /v1/auth, AND duplicated in the JSON
+ *                    body so a cross-origin SPA (S3 website → ALB) can persist it. SameSite=Lax
+ *                    cookies are not sent on cross-site fetch; SameSite=None requires Secure,
+ *                    which needs HTTPS on both sides.
  *
- * Rationale: the refresh token is the long-lived credential, so it must be unreadable by
- * JavaScript — an XSS bug should not yield persistent account access. It therefore lives in an
- * httpOnly cookie. The access token cannot be in a cookie, because then every request would
- * carry it automatically and the API would need CSRF defences; sending it in an
- * Authorization header means a cross-site form post cannot authenticate at all.
+ * The access token cannot live only in a cookie: every request would then carry it and the
+ * API would need CSRF defences. A cross-site form post cannot set an Authorization header.
  */
 
 const REFRESH_COOKIE_NAME = 'careflow_refresh';
@@ -46,7 +46,22 @@ const sessionResponseSchema = z.object({
   accessToken: z.string().describe('Bearer token for the Authorization header'),
   expiresAt: z.string().describe('Access token expiry (ISO-8601)'),
   expiresInSeconds: z.number().int().describe('Seconds until the access token expires'),
+  refreshToken: z
+    .string()
+    .describe(
+      'Opaque refresh token. Also set as an httpOnly cookie for same-origin clients. ' +
+        'Cross-origin SPAs must persist this and send it on POST /v1/auth/refresh.',
+    ),
   user: userSchema,
+});
+
+const refreshBodySchema = z.object({
+  refreshToken: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe('Required when the httpOnly cookie is not sent (cross-origin SPA).'),
 });
 
 export interface AuthRouteDependencies {
@@ -74,6 +89,7 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
       0,
       Math.floor((result.accessTokenExpiresAt.getTime() - Date.now()) / 1000),
     ),
+    refreshToken: result.refreshToken,
     user: {
       id: result.user.id,
       email: result.user.email,
@@ -82,6 +98,15 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
       ...(result.user.therapistId === undefined ? {} : { therapistId: result.user.therapistId }),
     },
   });
+
+  const presentedRefreshToken = (
+    cookieValue: string | undefined,
+    body: { refreshToken?: string } | undefined,
+  ): string | undefined => {
+    if (cookieValue !== undefined && cookieValue.length > 0) return cookieValue;
+    if (body?.refreshToken !== undefined && body.refreshToken.length > 0) return body.refreshToken;
+    return undefined;
+  };
 
   return async (app) => {
     app.post(
@@ -99,8 +124,9 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
           tags: ['Auth'],
           summary: 'Authenticate and start a session',
           description:
-            'Returns a short-lived access token in the body and sets a rotating refresh ' +
-            'token as an httpOnly cookie. Rate limited per IP.',
+            'Returns a short-lived access token and a rotating refresh token in the body, ' +
+            'and also sets the refresh token as an httpOnly cookie for same-origin clients. ' +
+            'Rate limited per IP.',
           body: loginBodySchema,
           response: {
             200: sessionResponseSchema.describe('Session established'),
@@ -140,10 +166,12 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
         },
         schema: {
           tags: ['Auth'],
-          summary: 'Exchange the refresh cookie for a new access token',
+          summary: 'Exchange a refresh token for a new access token',
           description:
-            'Single-use: the presented refresh token is revoked and replaced. Replaying an ' +
-            'already-rotated token is treated as theft and revokes the entire token family.',
+            'Accepts the refresh token from the httpOnly cookie or the JSON body. Single-use: ' +
+            'the presented token is revoked and replaced. Replaying an already-rotated token ' +
+            'is treated as theft and revokes the entire token family.',
+          body: refreshBodySchema,
           response: {
             200: sessionResponseSchema.describe('Session refreshed'),
             401: errorResponseSchema.describe('Missing, expired or already-used refresh token'),
@@ -153,10 +181,10 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
         },
       },
       async (request, reply) => {
-        const presented = request.cookies[REFRESH_COOKIE_NAME];
+        const presented = presentedRefreshToken(request.cookies[REFRESH_COOKIE_NAME], request.body);
 
         if (presented === undefined) {
-          throw authenticationRequired('A refresh token cookie is required.');
+          throw authenticationRequired('A refresh token is required.');
         }
 
         const result = await authService.refresh(presented);
@@ -180,6 +208,7 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
             'Revokes every refresh token in the presented token family, denylists the ' +
             'session so the access token cannot be reused, and clears the cookie. Always ' +
             'succeeds, so a client can reliably reach a signed-out state.',
+          body: refreshBodySchema,
           response: {
             204: z.null().describe('Session revoked'),
             500: errorResponseSchema,
@@ -188,7 +217,7 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
       },
       async (request, reply) => {
         await authService.logout(
-          request.cookies[REFRESH_COOKIE_NAME],
+          presentedRefreshToken(request.cookies[REFRESH_COOKIE_NAME], request.body),
           extractBearerToken(request),
         );
 

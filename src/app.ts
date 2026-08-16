@@ -222,8 +222,9 @@ export const buildApp = async (dependencies: AppDependencies): Promise<CareflowA
           'Therapist appointment booking API.',
           '',
           '**Authentication.** Call `POST /v1/auth/login`, then send the returned access token as',
-          '`Authorization: Bearer <token>`. The refresh token is set as an httpOnly cookie and is',
-          'exchanged at `POST /v1/auth/refresh`.',
+          '`Authorization: Bearer <token>`. The refresh token is returned in the login JSON ' +
+          '(and as an httpOnly cookie for same-origin clients) and is exchanged at ' +
+          '`POST /v1/auth/refresh`.',
           '',
           '**Idempotency.** Every mutating endpoint accepts an `Idempotency-Key` header. Retrying',
           'with the same key returns the original response instead of performing the work twice,',

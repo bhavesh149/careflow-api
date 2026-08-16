@@ -64,7 +64,7 @@ These are the prompts as typed. Typos left as-is.
 | Recurring series is all-or-nothing | A partial series is worse than a 409 that lists every clash. |
 | Transactional outbox → SQS | Notifications cannot be lost if the process dies after commit. |
 | Redis for cache and rate limits only | Fail-open on Redis so a cache outage cannot stop booking. |
-| Refresh token in httpOnly cookie; access token in memory | XSS should not yield a long-lived credential; CSRF should not ride on the access token. |
+| Refresh token in httpOnly cookie; also in login JSON for the SPA | Cookie works same-origin. Cross-origin S3→ALB cannot send `SameSite=Lax`; the SPA persists the JSON token in `localStorage`. |
 | Logout revokes the session, not only the refresh cookie | A stolen access JWT must fail as soon as the user signs out. |
 | HTTP ALB, no custom domain | Human constraint. HTTPS is the next step once a certificate exists. |
 | Separate frontend repo | Human constraint. This API is the contract the SPA consumes. |

@@ -3,7 +3,7 @@
   "info": {
     "title": "Careflow Appointment Booking API",
     "version": "1.0.0",
-    "description": "Therapist appointment booking API.\n\n**Authentication.** Call `POST /v1/auth/login`, then send the returned access token as\n`Authorization: Bearer <token>`. The refresh token is set as an httpOnly cookie and is\nexchanged at `POST /v1/auth/refresh`.\n\n**Idempotency.** Every mutating endpoint accepts an `Idempotency-Key` header. Retrying\nwith the same key returns the original response instead of performing the work twice,\nwhich makes the API safe to retry after a timeout. Reusing a key with a different body\nreturns `422 IDEMPOTENCY_KEY_REUSED`.\n\n**Concurrency.** Slot conflicts are resolved by the database, not the application, so a\nlosing request receives a deterministic `409` rather than an inconsistent success.\n\n**Time.** All timestamps are ISO-8601 with an explicit offset. Slots are half-open\n`[start, end)`, so a 10:00-11:00 and an 11:00-12:00 appointment do not conflict."
+    "description": "Therapist appointment booking API.\n\n**Authentication.** Call `POST /v1/auth/login`, then send the returned access token as\n`Authorization: Bearer <token>`. The refresh token is returned in the login JSON (and as an httpOnly cookie for same-origin clients) and is exchanged at `POST /v1/auth/refresh`.\n\n**Idempotency.** Every mutating endpoint accepts an `Idempotency-Key` header. Retrying\nwith the same key returns the original response instead of performing the work twice,\nwhich makes the API safe to retry after a timeout. Reusing a key with a different body\nreturns `422 IDEMPOTENCY_KEY_REUSED`.\n\n**Concurrency.** Slot conflicts are resolved by the database, not the application, so a\nlosing request receives a deterministic `409` rather than an inconsistent success.\n\n**Time.** All timestamps are ISO-8601 with an explicit offset. Slots are half-open\n`[start, end)`, so a 10:00-11:00 and an 11:00-12:00 appointment do not conflict."
   },
   "components": {
     "securitySchemes": {
@@ -204,7 +204,7 @@
         "tags": [
           "Auth"
         ],
-        "description": "Returns a short-lived access token in the body and sets a rotating refresh token as an httpOnly cookie. Rate limited per IP.",
+        "description": "Returns a short-lived access token and a rotating refresh token in the body, and also sets the refresh token as an httpOnly cookie for same-origin clients. Rate limited per IP.",
         "requestBody": {
           "required": true,
           "content": {
@@ -258,6 +258,10 @@
                       "maximum": 9007199254740991,
                       "description": "Seconds until the access token expires"
                     },
+                    "refreshToken": {
+                      "type": "string",
+                      "description": "Opaque refresh token. Also set as an httpOnly cookie for same-origin clients. Cross-origin SPAs must persist this and send it on POST /v1/auth/refresh."
+                    },
                     "user": {
                       "type": "object",
                       "properties": {
@@ -301,6 +305,7 @@
                     "accessToken",
                     "expiresAt",
                     "expiresInSeconds",
+                    "refreshToken",
                     "user"
                   ],
                   "additionalProperties": false,
@@ -614,11 +619,29 @@
     },
     "/v1/auth/refresh": {
       "post": {
-        "summary": "Exchange the refresh cookie for a new access token",
+        "summary": "Exchange a refresh token for a new access token",
         "tags": [
           "Auth"
         ],
-        "description": "Single-use: the presented refresh token is revoked and replaced. Replaying an already-rotated token is treated as theft and revokes the entire token family.",
+        "description": "Accepts the refresh token from the httpOnly cookie or the JSON body. Single-use: the presented token is revoked and replaced. Replaying an already-rotated token is treated as theft and revokes the entire token family.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "refreshToken": {
+                    "description": "Required when the httpOnly cookie is not sent (cross-origin SPA).",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Session refreshed",
@@ -640,6 +663,10 @@
                       "minimum": -9007199254740991,
                       "maximum": 9007199254740991,
                       "description": "Seconds until the access token expires"
+                    },
+                    "refreshToken": {
+                      "type": "string",
+                      "description": "Opaque refresh token. Also set as an httpOnly cookie for same-origin clients. Cross-origin SPAs must persist this and send it on POST /v1/auth/refresh."
                     },
                     "user": {
                       "type": "object",
@@ -684,6 +711,7 @@
                     "accessToken",
                     "expiresAt",
                     "expiresInSeconds",
+                    "refreshToken",
                     "user"
                   ],
                   "additionalProperties": false,
@@ -927,6 +955,24 @@
           "Auth"
         ],
         "description": "Revokes every refresh token in the presented token family, denylists the session so the access token cannot be reused, and clears the cookie. Always succeeds, so a client can reliably reach a signed-out state.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "refreshToken": {
+                    "description": "Required when the httpOnly cookie is not sent (cross-origin SPA).",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
+                }
+              }
+            }
+          }
+        },
         "responses": {
           "204": {
             "description": "Session revoked"
