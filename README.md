@@ -2,35 +2,36 @@
 
 Appointment booking API: hexagonal Node 22 + Fastify + Postgres. Three API tasks share one
 database that enforces “no double booking”; workers publish notifications off a transactional
-outbox. Frontend is a separate repo.
+outbox.
+
+Companion UI: [careflow-app](https://github.com/bhavesh149/careflow-app) (React SPA).
 
 | | |
 | --- | --- |
-| API (via nginx, stands in for the ALB) | http://localhost:8080 |
-| Swagger UI | http://localhost:8080/docs |
+| **Live app** | [S3 website](http://careflow-web-853184314326.s3-website.ap-south-1.amazonaws.com) |
+| **API (AWS ALB)** | http://carefl-alb16-n1msowftsytk-1345249308.ap-south-1.elb.amazonaws.com |
+| **Swagger** | […/docs](http://carefl-alb16-n1msowftsytk-1345249308.ap-south-1.elb.amazonaws.com/docs) |
+| API locally (nginx, stands in for the ALB) | http://localhost:8080 |
+| Swagger locally | http://localhost:8080/docs |
 | Direct tasks | http://localhost:3001 · 3002 · 3003 |
 | OpenAPI file | [`docs/api/openapi.json`](docs/api/openapi.json) |
 | Postman | [`docs/postman/`](docs/postman/) |
-| AWS first deploy | [`docs/05-aws-first-deploy.md`](docs/05-aws-first-deploy.md) |
 | AWS infrastructure | [`docs/06-aws-infrastructure.md`](docs/06-aws-infrastructure.md) |
+| AI usage | [`AI_USAGE.md`](AI_USAGE.md) |
 
 ---
 
 ## Status
 
-**The product backend is complete.** Auth, schedules, availability, holds, one-time and recurring
-booking, cancel/status, workers, tests, local Docker stack, and GitHub Actions YAML are in this
-repo.
-
-**Not done / optional next**
+Auth, schedules, availability, holds, one-time and recurring booking, cancel/status, session
+revoke on logout, workers, tests, local Docker stack, AWS deploy, and GitHub Actions
+(PR gate + ECS deploy) are in this repo. The React app lives in [careflow-app](https://github.com/bhavesh149/careflow-app).
 
 | Item | Notes |
 | --- | --- |
-| **CI/CD against this AWS account** | PR + Deploy YAML already exist. Still need: GitHub repo with this folder as root, OIDC provider, IAM role, secret `AWS_DEPLOY_ROLE_ARN`. Until then, deploy from the laptop (`make aws-deploy`). See [`docs/06-aws-infrastructure.md`](docs/06-aws-infrastructure.md). |
-| **HTTPS / custom domain** | No ACM cert; ALB is HTTP. Fine for the showcase. |
-| **Frontend** | Separate repo; not part of this checkout. |
+| **HTTPS / custom domain** | No ACM cert; ALB is HTTP so the S3 website can call it without mixed content. |
 | **Real notification sender** | Outbox → SQS → consumer is wired. The consumer logs; SES / Twilio are not connected. |
-| **Teardown** | `make aws-destroy` when the 3–4 day demo is over, or it keeps billing. |
+| **Teardown** | `make aws-destroy` when you no longer need the stack, or it keeps billing. |
 
 ---
 
@@ -90,7 +91,7 @@ win, so Docker Compose can point `DATABASE_URL` at host `postgres` without you m
 files.
 
 In AWS the same names are injected from Secrets Manager. There is no `.env` on the tasks.
-Details: [`docs/05-aws-first-deploy.md`](docs/05-aws-first-deploy.md).
+Deploy: [`infra/README.md`](infra/README.md). Why each service exists: [`docs/06-aws-infrastructure.md`](docs/06-aws-infrastructure.md).
 
 Hostnames in `.env` are `localhost` so `npm run dev` against published ports works. Compose
 overrides Postgres / Redis / SQS URLs to Compose DNS names.
@@ -267,8 +268,8 @@ Workflows live in `.github/workflows/` of **this** repo:
   Postgres 17 service, Docker build, Trivy (HIGH/CRITICAL). No AWS credentials required.
 - **main (Deploy)** — push to ECR → gated migration `RunTask` (must exit 0) → CDK deploy with
   ECS circuit-breaker rollback → smoke `/health` + `/ready`. Needs GitHub secret
-  `AWS_DEPLOY_ROLE_ARN`. Will fail until the CDK stack exists and has been bootstrapped —
-  see [`docs/05-aws-first-deploy.md`](docs/05-aws-first-deploy.md).
+  `AWS_DEPLOY_ROLE_ARN`. Needs the CDK stack to exist and the account to be bootstrapped —
+  see [`infra/README.md`](infra/README.md).
 
 ---
 

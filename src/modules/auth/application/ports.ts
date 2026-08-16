@@ -47,5 +47,11 @@ export interface RefreshTokenRepository {
   /** Revokes every token in a family. Used on logout and on reuse detection. */
   revokeFamily(familyId: string, reason: RefreshTokenRevokedReason): Promise<number>;
 
+  /**
+   * True while the family still has a live refresh token. After logout or reuse detection
+   * every member is revoked, so this is false and the matching access token must be refused.
+   */
+  isFamilyActive(familyId: string): Promise<boolean>;
+
   deleteExpired(): Promise<number>;
 }

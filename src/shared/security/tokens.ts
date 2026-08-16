@@ -9,7 +9,10 @@ import type { UserRole } from '@/shared/database/schema.js';
  *
  * Why the split:
  *   * The access token is a short-lived signed JWT so that the three API tasks can
- *     authenticate a request without a database round trip on every call.
+ *     authenticate a request without trusting client-supplied identity. Signature, issuer,
+ *     audience and expiry are checked first. Session liveness (`sid`) is then checked so
+ *     logout and reuse-detection take effect immediately, rather than leaving a stolen JWT
+ *     valid until its clock runs out.
  *   * The refresh token is an opaque random string, NOT a JWT. It must be revocable, and
  *     revoking a stateless JWT requires a server-side denylist anyway — at which point the
  *     JWT format buys nothing and only invites someone to trust its claims without a lookup.

@@ -3,12 +3,11 @@
 CDK v2 app for the booking backend. Entry: [`bin/app.ts`](bin/app.ts). Stack:
 [`lib/careflow-stack.ts`](lib/careflow-stack.ts).
 
-This stack is sized for a **few-day showcase**: HTTP ALB (no domain), 3 API tasks, one of
-each worker, `db.t4g.micro` Postgres 17, `cache.t4g.micro` Redis, no NAT Gateway. Tear it
-down with `make aws-destroy` when you are done.
+The stack is sized to the product: HTTP ALB (no custom domain), **3 API tasks**, one of
+each worker, `db.t4g.micro` Postgres 17, `cache.t4g.micro` Redis, no NAT Gateway (Fargate
+public IP; RDS/Redis isolated). Tear it down with `make aws-destroy` when you no longer need it.
 
 Why each AWS service exists: [`../docs/06-aws-infrastructure.md`](../docs/06-aws-infrastructure.md).
-Account, IAM OIDC, GitHub secret, ACM: [`../docs/05-aws-first-deploy.md`](../docs/05-aws-first-deploy.md).
 
 ```bash
 export AWS_PROFILE=careflow
@@ -21,7 +20,7 @@ The Deploy workflow expects these CloudFormation outputs on stack `Careflow`:
 
 - `ClusterName`
 - `MigrateTaskDefinitionFamily`
-- `IsolatedSubnetIds` (public subnets in this showcase; tasks use a public IP)
+- `IsolatedSubnetIds` (public subnets in this VPC; tasks use a public IP)
 - `TaskSecurityGroupId`
 - `ApiUrl`
 

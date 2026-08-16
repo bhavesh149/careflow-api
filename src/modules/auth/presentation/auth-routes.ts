@@ -5,7 +5,7 @@ import { authenticationRequired } from '@/shared/errors/app-error.js';
 import { commonErrorResponses, errorResponseSchema } from '@/shared/http/schemas.js';
 import { Metric, type MetricsRegistry } from '@/shared/observability/index.js';
 import type { AuthService, LoginResult } from '@/modules/auth/application/auth-service.js';
-import { getPrincipal } from '@/modules/auth/presentation/authenticate.js';
+import { getPrincipal, extractBearerToken } from '@/modules/auth/presentation/authenticate.js';
 
 /**
  * Auth endpoints.
@@ -177,8 +177,9 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
           tags: ['Auth'],
           summary: 'Revoke the current session',
           description:
-            'Revokes every refresh token in the presented token family and clears the cookie. ' +
-            'Always succeeds, so a client can reliably reach a signed-out state.',
+            'Revokes every refresh token in the presented token family, denylists the ' +
+            'session so the access token cannot be reused, and clears the cookie. Always ' +
+            'succeeds, so a client can reliably reach a signed-out state.',
           response: {
             204: z.null().describe('Session revoked'),
             500: errorResponseSchema,
@@ -186,7 +187,10 @@ export const registerAuthRoutes = (dependencies: AuthRouteDependencies): Fastify
         },
       },
       async (request, reply) => {
-        await authService.logout(request.cookies[REFRESH_COOKIE_NAME]);
+        await authService.logout(
+          request.cookies[REFRESH_COOKIE_NAME],
+          extractBearerToken(request),
+        );
 
         // Clearing must use the same path/domain the cookie was set with, or the browser
         // keeps the original and the user stays logged in.

@@ -12,11 +12,13 @@ import {
   needsRehash,
   performDummyVerification,
   signAccessToken,
+  verifyAccessToken,
   verifyPassword,
   hashPassword,
 } from '@/shared/security/index.js';
 import { normalizeEmail, type User } from '@/modules/auth/domain/user.js';
 import type { RefreshTokenRepository, UserRepository } from '@/modules/auth/application/ports.js';
+import type { CacheClient } from '@/shared/cache/index.js';
 
 export interface SessionTokens {
   readonly accessToken: string;
@@ -32,17 +34,31 @@ export interface LoginResult extends SessionTokens {
 export interface AuthService {
   login(email: string, password: string): Promise<LoginResult>;
   refresh(presentedToken: string): Promise<LoginResult>;
-  logout(presentedToken: string | undefined): Promise<void>;
+  logout(presentedToken: string | undefined, accessToken?: string): Promise<void>;
+  /** False after logout / reuse detection, even if the JWT has not yet expired. */
+  isSessionActive(sessionId: string): Promise<boolean>;
   getCurrentUser(userId: string): Promise<User>;
 }
+
+const revokedSessionKey = (sessionId: string): string => `auth:revoked:${sessionId}`;
 
 export const createAuthService = (dependencies: {
   config: AppConfig;
   logger: Logger;
   users: UserRepository;
   refreshTokens: RefreshTokenRepository;
+  cache: CacheClient;
 }): AuthService => {
-  const { config, logger, users, refreshTokens } = dependencies;
+  const { config, logger, users, refreshTokens, cache } = dependencies;
+
+  const revokeSession = async (
+    familyId: string,
+    reason: 'LOGOUT' | 'REUSE_DETECTED',
+  ): Promise<number> => {
+    const revoked = await refreshTokens.revokeFamily(familyId, reason);
+    await cache.set(revokedSessionKey(familyId), '1', config.ACCESS_TOKEN_TTL_SECONDS);
+    return revoked;
+  };
 
   const issueSession = async (
     user: User,
@@ -158,7 +174,7 @@ export const createAuthService = (dependencies: {
       }
 
       if (stored.revokedAt !== null) {
-        await refreshTokens.revokeFamily(stored.familyId, 'REUSE_DETECTED');
+        await revokeSession(stored.familyId, 'REUSE_DETECTED');
         logger.warn(
           { userId: stored.userId, familyId: stored.familyId, event: 'refresh.reuse_detected' },
           'revoked refresh token replayed; family revoked',
@@ -183,19 +199,47 @@ export const createAuthService = (dependencies: {
      * cannot be resurrected by a token issued earlier in the same chain.
      *
      * Always resolves: a client clearing its cookie must not be blocked by an unknown token.
+     * The matching access token is refused immediately via `isSessionActive`, not left valid
+     * until its 15-minute JWT expiry.
      */
-    logout: async (presentedToken) => {
-      if (presentedToken === undefined || presentedToken.length === 0) {
+    logout: async (presentedToken, accessToken) => {
+      let familyId: string | undefined;
+      let userId: string | undefined;
+
+      if (presentedToken !== undefined && presentedToken.length > 0) {
+        const stored = await refreshTokens.findByHash(hashRefreshToken(presentedToken));
+        familyId = stored?.familyId;
+        userId = stored?.userId;
+      }
+
+      if (familyId === undefined && accessToken !== undefined && accessToken.length > 0) {
+        try {
+          const claims = await verifyAccessToken(config, accessToken);
+          familyId = claims.sid;
+          userId = claims.sub;
+        } catch {
+          // Expired or malformed access tokens must not block logout.
+        }
+      }
+
+      if (familyId === undefined) {
         return;
       }
 
-      const stored = await refreshTokens.findByHash(hashRefreshToken(presentedToken));
-      if (!stored) {
-        return;
+      const revoked = await revokeSession(familyId, 'LOGOUT');
+      logger.info({ userId, familyId, revoked, event: 'logout' }, 'session revoked');
+    },
+
+    isSessionActive: async (sessionId) => {
+      if (await cache.get(revokedSessionKey(sessionId))) {
+        return false;
       }
 
-      const revoked = await refreshTokens.revokeFamily(stored.familyId, 'LOGOUT');
-      logger.info({ userId: stored.userId, revoked, event: 'logout' }, 'session revoked');
+      const active = await refreshTokens.isFamilyActive(sessionId);
+      if (!active) {
+        await cache.set(revokedSessionKey(sessionId), '1', config.ACCESS_TOKEN_TTL_SECONDS);
+      }
+      return active;
     },
 
     getCurrentUser: loadUser,

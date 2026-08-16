@@ -110,6 +110,7 @@ describe('auth', () => {
       method: 'POST',
       url: '/v1/auth/logout',
       cookies: session.cookies,
+      token: session.token,
     });
     expect(logout.status).toBe(204);
 
@@ -119,5 +120,13 @@ describe('auth', () => {
       cookies: session.cookies,
     });
     expect(refresh.status).toBe(401);
+
+    const stillAuthed = await request(ctx.app, {
+      method: 'GET',
+      url: '/v1/me',
+      token: session.token,
+    });
+    expect(stillAuthed.status).toBe(401);
+    expect(errorCode(stillAuthed)).toBe('AUTHENTICATION_REQUIRED');
   });
 });

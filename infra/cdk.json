@@ -8,6 +8,7 @@
     "@aws-cdk/aws-ecs:enableImdsBlockingDeprecatedFeature": true,
     "region": "ap-south-1",
     "imageTag": "latest",
-    "jwtSecretArn": "arn:aws:secretsmanager:ap-south-1:853184314326:secret:careflow/jwt-ocfR7Y"
+    "jwtSecretArn": "arn:aws:secretsmanager:ap-south-1:853184314326:secret:careflow/jwt-ocfR7Y",
+    "corsOrigins": "http://localhost:5173,http://localhost:3000,http://localhost:8080,http://careflow-web-853184314326.s3-website.ap-south-1.amazonaws.com"
   }
 }

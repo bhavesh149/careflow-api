@@ -31,16 +31,15 @@ const DATABASE_NAME = 'careflow';
 const DATABASE_USER = 'careflow_owner';
 
 /**
- * Showcase-sized Careflow backend.
+ * Careflow backend on ECS Fargate.
  *
- * Sized for a few days behind the ALB DNS name (HTTP, no domain / ACM). 3 API tasks,
- * one of each worker, single-AZ RDS, no NAT (Fargate in public subnets with a public IP;
- * RDS and Redis stay isolated). Destroy the stack when the demo is over.
+ * HTTP ALB (no domain / ACM). 3 API tasks, one of each worker, single-AZ RDS,
+ * no NAT (Fargate in public subnets with a public IP; RDS and Redis stay isolated).
  */
 export class CareflowStack extends Stack {
   /**
    * Pin AZs so `cdk synth` does not call `ec2:DescribeAvailabilityZones`.
-   * Mumbai has these two as the usual pair for a 2-AZ showcase VPC.
+   * Mumbai has these two as the usual pair for a 2-AZ VPC.
    */
   public override get availabilityZones(): string[] {
     return ['ap-south-1a', 'ap-south-1b'];
@@ -407,7 +406,7 @@ export class CareflowStack extends Stack {
     new CfnOutput(this, 'IsolatedSubnetIds', {
       value: Fn.join(',', vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnetIds),
       description:
-        'Subnets used by the Deploy workflow RunTask. Public + assignPublicIp for this showcase VPC.',
+        'Subnets used by the Deploy workflow RunTask. Public + assignPublicIp.',
     });
     new CfnOutput(this, 'TaskSecurityGroupId', {
       value: taskSg.securityGroupId,

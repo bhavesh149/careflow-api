@@ -20,8 +20,11 @@ declare module 'fastify' {
  * each route state its own requirement means an unprotected endpoint is visible in review, and
  * the E2E suite asserts that every mutating route rejects anonymous callers.
  */
-const authPlugin: FastifyPluginAsync<{ config: AppConfig }> = async (app, options) => {
-  app.decorate('authenticate', createAuthenticateHook(options.config));
+const authPlugin: FastifyPluginAsync<{
+  config: AppConfig;
+  isSessionActive: (sessionId: string) => Promise<boolean>;
+}> = async (app, options) => {
+  app.decorate('authenticate', createAuthenticateHook(options.config, options.isSessionActive));
 };
 
 export default fp(authPlugin, {

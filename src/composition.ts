@@ -83,6 +83,7 @@ export const composeApp = async (options: ComposeOptions = {}): Promise<Composed
       logger,
       users: createPgUserRepository(db),
       refreshTokens: createPgRefreshTokenRepository(db),
+      cache,
     }),
     scheduleService: createScheduleService({ config, logger, db, cache, schedules }),
     therapistDirectory: createPgTherapistDirectory(db),

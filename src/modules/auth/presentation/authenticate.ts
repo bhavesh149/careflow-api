@@ -15,7 +15,7 @@ import type { Principal } from '@/shared/http/request-context.js';
  * it is scoped to a single endpoint (`/v1/auth/refresh`) with SameSite protection.
  */
 
-const extractBearerToken = (request: FastifyRequest): string | undefined => {
+export const extractBearerToken = (request: FastifyRequest): string | undefined => {
   const header = request.headers.authorization;
   if (typeof header !== 'string') return undefined;
 
@@ -27,7 +27,10 @@ const extractBearerToken = (request: FastifyRequest): string | undefined => {
   return token;
 };
 
-export const createAuthenticateHook = (config: AppConfig): preHandlerAsyncHookHandler => {
+export const createAuthenticateHook = (
+  config: AppConfig,
+  isSessionActive: (sessionId: string) => Promise<boolean>,
+): preHandlerAsyncHookHandler => {
   return async (request: FastifyRequest, _reply: FastifyReply): Promise<void> => {
     const token = extractBearerToken(request);
 
@@ -36,6 +39,10 @@ export const createAuthenticateHook = (config: AppConfig): preHandlerAsyncHookHa
     }
 
     const claims = await verifyAccessToken(config, token);
+
+    if (!(await isSessionActive(claims.sid))) {
+      throw authenticationRequired('The session is no longer valid.');
+    }
 
     const principal: Principal = {
       userId: claims.sub,
