@@ -926,7 +926,7 @@
         "tags": [
           "Auth"
         ],
-        "description": "Revokes every refresh token in the presented token family and clears the cookie. Always succeeds, so a client can reliably reach a signed-out state.",
+        "description": "Revokes every refresh token in the presented token family, denylists the session so the access token cannot be reused, and clears the cookie. Always succeeds, so a client can reliably reach a signed-out state.",
         "responses": {
           "204": {
             "description": "Session revoked"
