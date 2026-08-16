@@ -309,7 +309,10 @@ export const buildApp = async (dependencies: AppDependencies): Promise<CareflowA
     );
   });
 
-  await app.register(authPlugin, { config });
+  await app.register(authPlugin, {
+    config,
+    isSessionActive: (sessionId) => dependencies.authService.isSessionActive(sessionId),
+  });
 
   // ---- Routes -----------------------------------------------------------
   await app.register(registerObservabilityRoutes({ config, db, pool, cache, metrics, shutdown }));

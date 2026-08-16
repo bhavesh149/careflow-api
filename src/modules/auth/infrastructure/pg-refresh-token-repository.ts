@@ -104,6 +104,20 @@ export const createPgRefreshTokenRepository = (db: Database): RefreshTokenReposi
     return result.rowCount ?? 0;
   },
 
+  isFamilyActive: async (familyId: string): Promise<boolean> => {
+    const result = await db.execute<{ exists: boolean }>(sql`
+      SELECT EXISTS (
+        SELECT 1
+          FROM refresh_tokens
+         WHERE family_id = ${familyId}::uuid
+           AND revoked_at IS NULL
+           AND expires_at > now()
+      ) AS exists
+    `);
+
+    return result.rows[0]?.exists === true;
+  },
+
   /** Housekeeping: expired tokens are dead weight and are removed by the sweeper. */
   deleteExpired: async (): Promise<number> => {
     const result = await db.execute(sql`

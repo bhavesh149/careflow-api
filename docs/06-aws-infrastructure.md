@@ -3,11 +3,11 @@
 Region: **`ap-south-1` (Mumbai)**. Source of truth: [`infra/lib/careflow-stack.ts`](../infra/lib/careflow-stack.ts).
 Do not click-create ECS/RDS/SQS in the console; the next `cdk deploy` will fight you.
 
-This is a **few-day showcase** sized to match the product (three API tasks, Postgres as the
-booking authority) without paying for NAT Gateways, Multi-AZ RDS, or a custom domain. Tear it
-down with `make aws-destroy` when the demo is over.
+The stack matches the product: **three API tasks**, Postgres as the booking authority, Redis off the correctness path, workers as separate processes. NAT Gateway, Multi-AZ RDS, and a custom domain were skipped to keep cost down (public-subnet Fargate with a public IP; RDS/Redis isolated). Tear it down with `make aws-destroy` when you no longer need it.
 
-First-time account steps (IAM, secrets, bootstrap): [`05-aws-first-deploy.md`](05-aws-first-deploy.md).
+Deploy commands: [`../infra/README.md`](../infra/README.md).
+
+![Careflow AWS infrastructure](careflow-aws-infra.png)
 
 ---
 
@@ -56,7 +56,7 @@ stand in for the API service, LocalStack stands in for SQS.
 
 | Service | What we created | Why |
 | --- | --- | --- |
-| **VPC** | 2 AZs, public + isolated subnets, **no NAT Gateway** | Isolate RDS/Redis from the internet. Skip NAT (~$32/month) because this stack only lives a few days. |
+| **VPC** | 2 AZs, public + isolated subnets, **no NAT Gateway** | Isolate RDS/Redis from the internet. Fargate public IPs reach AWS APIs without NAT (~$32/month). |
 | **Internet Gateway** | Attached to the VPC | ALB and Fargate need a path to the internet (pull images, talk to SQS / Secrets Manager / CloudWatch). |
 | **Public subnets** | ALB + ECS Fargate (`assignPublicIp: ENABLED`) | Fargate with a public IP can reach AWS APIs without NAT or VPC interface endpoints. |
 | **Isolated subnets** | RDS + Redis, no public IP | Data plane is not reachable from the internet. Only the task security group may connect on 5432 / 6379. |
@@ -87,7 +87,7 @@ Fargate is **x86_64**. Laptop deploys build `linux/amd64` (QEMU on Apple Silicon
 
 | Service | What we created | Why |
 | --- | --- | --- |
-| **RDS PostgreSQL 17** | `db.t4g.micro`, single-AZ, 20 GB, encrypted, not publicly accessible | **Source of truth** for appointments, holds, idempotency. GiST exclusion constraints make double-booking impossible even when three tasks write at once. Single-AZ is a cost choice for a short demo, not an HA choice. |
+| **RDS PostgreSQL 17** | `db.t4g.micro`, single-AZ, 20 GB, encrypted, not publicly accessible | **Source of truth** for appointments, holds, idempotency. GiST exclusion constraints make double-booking impossible even when three tasks write at once. Single-AZ is a cost choice, not an HA choice. |
 | **ElastiCache Redis 7** | `cache.t4g.micro`, one node, isolated subnet | Rate limits and schedule **cache only**. Booking never consults Redis. If Redis dies, `/ready` reports it and the API keeps serving (in-process limiter). |
 | **SQS** | Standard queue + DLQ, 60s visibility timeout | Durable at-least-once delivery for outbox events. A notification outage must not fail a committed booking. |
 | **Secrets Manager** | `careflow/jwt` (you generated) + RDS-generated password | ECS injects `JWT_SECRET` and `DB_PASSWORD`. There is no `.env` on the tasks. Access keys are not stored in GitHub. |
@@ -97,7 +97,7 @@ Fargate is **x86_64**. Laptop deploys build `linux/amd64` (QEMU on Apple Silicon
 | Service | What we created | Why |
 | --- | --- | --- |
 | **ECR** | Repository `careflow` | Immutable images. CI will push `careflow:<git-sha>`. The first laptop deploy used a CDK Docker asset; later deploys with `--context imageTag=<sha>` pull from this repo. |
-| **CloudWatch Logs** | One log group, 7-day retention | API + workers + migrator. Cheap enough to keep for the demo; destroy with the stack. |
+| **CloudWatch Logs** | One log group, 7-day retention | API + workers + migrator. Destroy with the stack. |
 | **IAM task role** | Send/receive SQS | Runtime identity. The SDK uses this role, not `AWS_ACCESS_KEY_ID`. |
 | **IAM execution role** | Pull ECR, read secrets, write logs | What ECS needs **before** the process starts. |
 | **CDK bootstrap (`CDKToolkit`)** | S3 + IAM roles CDK itself uses | One-time per account/region. Not the Careflow product stack. |
@@ -106,17 +106,17 @@ Fargate is **x86_64**. Laptop deploys build `linux/amd64` (QEMU on Apple Silicon
 
 ## What we deliberately did not use
 
-| Not used | Why not, for this showcase |
+| Not used | Why not |
 | --- | --- |
-| **NAT Gateway** | Cost. Public IP on Fargate replaces it. A longer-lived production stack should move tasks to private subnets + NAT or interface endpoints. |
-| **VPC interface endpoints** | Same reason: several endpoints cost more than four days of NAT. |
-| **ACM + Route 53** | No domain. HTTP ALB DNS is enough to demo. HSTS / `upgrade-insecure-requests` are off while `COOKIE_SECURE=false`. |
-| **WAF** | Extra cost; this is a short public demo, not a hardened edge. |
-| **RDS Multi-AZ / Redis replica** | HA for a week of showcase is not worth 2× the data bill. |
+| **NAT Gateway** | Cost. Public IP on Fargate replaces it. A locked-down production stack should move tasks to private subnets + NAT or interface endpoints. |
+| **VPC interface endpoints** | Several endpoints cost more than they save at this scale. |
+| **ACM + Route 53** | No domain. HTTP ALB DNS is enough. HSTS / `upgrade-insecure-requests` are off while `COOKIE_SECURE=false`. |
+| **WAF** | Extra cost at the edge; rate limits live on the API. |
+| **RDS Multi-AZ / Redis replica** | 2× the data bill for HA that this size does not need. |
 | **ECS on EC2** | Server patching with no benefit for three tasks. |
 | **Lambda for the API** | Long-running, connection-heavy booking API; Fargate matches the three-instance model cleanly. |
 | **SES / Twilio** | Outbox path is real; the consumer logs. Wiring a vendor is a product choice, not a deploy blocker. |
-| **S3 / CloudFront** | Frontend is a separate repo. |
+| **CloudFront** | The SPA is on S3 website hosting (HTTP) so it can call this HTTP ALB without mixed content. |
 
 ---
 
@@ -144,15 +144,15 @@ is the GitHub repo root**.
 | **PR** (`pr.yml`) | Pull request / push to `main` | Typecheck, lint, unit, `npm audit`, OpenAPI drift, integration/concurrency/e2e vs Postgres 17, Docker build, Trivy HIGH/CRITICAL | No |
 | **Deploy** (`deploy.yml`) | Push to `main` or manual | Push image to ECR → gated `ecs run-task` migrate (must exit 0) → `cdk deploy` with `imageTag=$GITHUB_SHA` → smoke `/health` `/ready` | Yes: GitHub OIDC role `AWS_DEPLOY_ROLE_ARN` |
 
-Until the backend is its own GitHub repo **and** that OIDC role exists, deploys stay on the
-laptop (`make aws-deploy`). Do not push to `main` with the Deploy workflow enabled unless that
-secret is set — the job will fail on `sts:AssumeRoleWithWebIdentity`.
+Until the OIDC role exists, deploys stay on the laptop (`make aws-deploy`). Do not push to
+`main` with the Deploy workflow enabled unless that secret is set — the job will fail on
+`sts:AssumeRoleWithWebIdentity`.
 
-OIDC setup is in [`05-aws-first-deploy.md`](05-aws-first-deploy.md) § GitHub OIDC.
+OIDC setup is in [`../infra/README.md`](../infra/README.md).
 
 ---
 
-## Live endpoints (this showcase)
+## Live endpoints
 
 Replace with the current stack output if the ALB was recreated:
 
@@ -169,8 +169,8 @@ Seeded password: `Careflow!2026`. After `/docs` loads, Authorize with the `acces
 
 ## Cost and teardown
 
-Expect **about $15–25 for four days** (ALB, 6 Fargate tasks, `db.t4g.micro`, `cache.t4g.micro`,
-public IPv4). It keeps billing until:
+ALB, 6 Fargate tasks, `db.t4g.micro`, `cache.t4g.micro`, and public IPv4 are the main line items.
+The stack keeps billing until:
 
 ```bash
 export AWS_PROFILE=careflow

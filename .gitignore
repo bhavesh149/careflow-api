@@ -10,9 +10,12 @@ infra/.cdk.staging/
 .env
 .env.*
 !.env.example
+.env.aws
 
 *.log
 npm-debug.log*
 .DS_Store
 .idea/
+.cursor/
+*.pem
 *.swp
