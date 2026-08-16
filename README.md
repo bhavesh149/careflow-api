@@ -171,8 +171,8 @@ curl -sX POST http://localhost:8080/v1/auth/login \
   -d '{"email":"patient@careflow.test","password":"Careflow!2026"}'
 ```
 
-Access token is in the JSON body (15 min). Refresh token is an `httpOnly` cookie on `/v1/auth`.
-Send `Authorization: Bearer <token>` on everything else.
+Access token is in the JSON body (15 min). Refresh token is in that same JSON (for cross-origin SPAs) and as an `httpOnly` cookie on `/v1/auth` for same-origin clients.
+Send `Authorization: Bearer <token>` on everything else. Cross-origin clients send `{ "refreshToken" }` on `POST /v1/auth/refresh`.
 
 State-changing booking routes **require** `Idempotency-Key` (UUID). Reuse the same key to retry;
 a different body on the same key returns `422 IDEMPOTENCY_KEY_REUSED`.

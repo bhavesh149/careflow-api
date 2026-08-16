@@ -17,20 +17,22 @@ describe('auth', () => {
 
   it('issues an access token and a refresh cookie on login', async () => {
     const clinic = await seedClinic();
-    const response = await request<{ accessToken: string; user: { role: string; email: string } }>(
-      ctx.app,
-      {
-        method: 'POST',
-        url: '/v1/auth/login',
-        body: { email: clinic.patient.email, password: TEST_PASSWORD },
-      },
-    );
+    const response = await request<{
+      accessToken: string;
+      refreshToken: string;
+      user: { role: string; email: string };
+    }>(ctx.app, {
+      method: 'POST',
+      url: '/v1/auth/login',
+      body: { email: clinic.patient.email, password: TEST_PASSWORD },
+    });
 
     expect(response.status).toBe(200);
     expect(response.body.accessToken.length).toBeGreaterThan(20);
     expect(response.body.user.role).toBe('PATIENT');
     expect(response.body.user.email).toBe(clinic.patient.email);
     expect(response.cookies).toMatch(/careflow_refresh=/);
+    expect(response.body.refreshToken.length).toBeGreaterThan(20);
   });
 
   it('returns the same error for an unknown email and a wrong password', async () => {
@@ -66,6 +68,7 @@ describe('auth', () => {
       method: 'POST',
       url: '/v1/auth/refresh',
       cookies: originalCookie,
+      body: {},
     });
 
     expect(rotated.status).toBe(200);
@@ -78,6 +81,7 @@ describe('auth', () => {
       method: 'POST',
       url: '/v1/auth/refresh',
       cookies: originalCookie,
+      body: {},
     });
 
     expect(reused.status).toBe(401);
@@ -111,6 +115,7 @@ describe('auth', () => {
       url: '/v1/auth/logout',
       cookies: session.cookies,
       token: session.token,
+      body: {},
     });
     expect(logout.status).toBe(204);
 
@@ -118,6 +123,7 @@ describe('auth', () => {
       method: 'POST',
       url: '/v1/auth/refresh',
       cookies: session.cookies,
+      body: {},
     });
     expect(refresh.status).toBe(401);
 
@@ -128,5 +134,31 @@ describe('auth', () => {
     });
     expect(stillAuthed.status).toBe(401);
     expect(errorCode(stillAuthed)).toBe('AUTHENTICATION_REQUIRED');
+  });
+
+  it('refreshes from the JSON body when no cookie is sent', async () => {
+    const clinic = await seedClinic();
+    const first = await request<{ accessToken: string; refreshToken: string }>(ctx.app, {
+      method: 'POST',
+      url: '/v1/auth/login',
+      body: { email: clinic.patient.email, password: TEST_PASSWORD },
+    });
+
+    const rotated = await request<{ accessToken: string; refreshToken: string }>(ctx.app, {
+      method: 'POST',
+      url: '/v1/auth/refresh',
+      body: { refreshToken: first.body.refreshToken },
+    });
+
+    expect(rotated.status).toBe(200);
+    expect(rotated.body.accessToken.length).toBeGreaterThan(20);
+    expect(rotated.body.refreshToken).not.toBe(first.body.refreshToken);
+
+    const reused = await request(ctx.app, {
+      method: 'POST',
+      url: '/v1/auth/refresh',
+      body: { refreshToken: first.body.refreshToken },
+    });
+    expect(reused.status).toBe(401);
   });
 });
